@@ -13,13 +13,14 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO_ROOT / "codex-cli" / "scripts" / "build_npm_package.py"
 WORKFLOW_NAME = ".github/workflows/rust-release.yml"
-GITHUB_REPO = "openai/codex"
+DEFAULT_GITHUB_REPO = "o3dotdev/o3-codex"
 BINARY_TARGETS = (
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
@@ -139,6 +140,20 @@ def expand_packages(packages: list[str]) -> list[str]:
     return expanded
 
 
+def github_repo() -> str:
+    return os.environ.get("GITHUB_REPOSITORY") or DEFAULT_GITHUB_REPO
+
+
+def github_repo_from_workflow_url(workflow_url: str) -> str | None:
+    parsed = urlparse(workflow_url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parsed.netloc != "github.com" or len(parts) < 5:
+        return None
+    if parts[2:4] != ["actions", "runs"]:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
 def resolve_release_workflow(version: str) -> dict:
     stdout = subprocess.check_output(
         [
@@ -146,7 +161,9 @@ def resolve_release_workflow(version: str) -> dict:
             "run",
             "list",
             "--branch",
-            f"rust-v{version}",
+            f"v{version}",
+            "--repo",
+            github_repo(),
             "--json",
             "workflowName,url,headSha",
             "--workflow",
@@ -183,12 +200,17 @@ def install_native_components(
     vendor_dir = vendor_root / "vendor"
     vendor_dir.mkdir(parents=True, exist_ok=True)
 
+    artifact_repo = github_repo_from_workflow_url(workflow_url) or github_repo()
     workflow_id = workflow_url.rstrip("/").split("/")[-1]
-    print(f"Downloading native artifacts from workflow {workflow_id}...", flush=True)
+    print(
+        f"Downloading native artifacts from {artifact_repo} workflow {workflow_id}...",
+        flush=True,
+    )
     with _gha_group(f"Download native artifacts from workflow {workflow_id}"):
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         install_from_workflow_artifacts(
             workflow_id,
+            artifact_repo,
             artifacts_dir,
             sorted(components),
             vendor_dir,
@@ -198,12 +220,13 @@ def install_native_components(
 
 def install_from_workflow_artifacts(
     workflow_id: str,
+    artifact_repo: str,
     artifacts_dir: Path,
     components: Sequence[str],
     vendor_dir: Path,
 ) -> None:
-    artifacts = select_target_artifacts(workflow_id, components)
-    download_artifacts(workflow_id, artifacts_dir, artifacts)
+    artifacts = select_target_artifacts(workflow_id, artifact_repo, components)
+    download_artifacts(workflow_id, artifact_repo, artifacts_dir, artifacts)
     if CODEX_PACKAGE_COMPONENT in components:
         install_codex_package_archives(artifacts_dir, vendor_dir, BINARY_TARGETS)
     install_binary_components(
@@ -215,6 +238,7 @@ def install_from_workflow_artifacts(
 
 def select_target_artifacts(
     workflow_id: str,
+    artifact_repo: str,
     components: Sequence[str],
 ) -> list[WorkflowArtifact]:
     needs_target_artifacts = CODEX_PACKAGE_COMPONENT in components or any(
@@ -224,7 +248,8 @@ def select_target_artifacts(
         return []
 
     artifacts_by_name = {
-        artifact.name: artifact for artifact in list_workflow_artifacts(workflow_id)
+        artifact.name: artifact
+        for artifact in list_workflow_artifacts(workflow_id, artifact_repo)
     }
     selected_artifacts: list[WorkflowArtifact] = []
     for target in BINARY_TARGETS:
@@ -241,12 +266,12 @@ def select_target_artifacts(
     return selected_artifacts
 
 
-def list_workflow_artifacts(workflow_id: str) -> list[WorkflowArtifact]:
+def list_workflow_artifacts(workflow_id: str, artifact_repo: str) -> list[WorkflowArtifact]:
     stdout = subprocess.check_output(
         [
             "gh",
             "api",
-            f"repos/{GITHUB_REPO}/actions/runs/{workflow_id}/artifacts",
+            f"repos/{artifact_repo}/actions/runs/{workflow_id}/artifacts",
             "--paginate",
             "--jq",
             ".artifacts[] | [.name, .size_in_bytes] | @tsv",
@@ -262,6 +287,7 @@ def list_workflow_artifacts(workflow_id: str) -> list[WorkflowArtifact]:
 
 def download_artifacts(
     workflow_id: str,
+    artifact_repo: str,
     dest_dir: Path,
     artifacts: Sequence[WorkflowArtifact],
 ) -> None:
@@ -294,7 +320,7 @@ def download_artifacts(
                 "--dir",
                 str(artifact_dir),
                 "--repo",
-                GITHUB_REPO,
+                artifact_repo,
                 workflow_id,
             ]
         )
