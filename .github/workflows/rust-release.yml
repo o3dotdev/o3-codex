@@ -1,8 +1,8 @@
 # Release workflow for codex-rs.
 # To release, follow a workflow like:
 # ```
-# git tag -a rust-v0.1.0 -m "Release 0.1.0"
-# git push origin rust-v0.1.0
+# git tag -a v0.134.0-o3.1 -m "Release 0.134.0-o3.1"
+# git push origin v0.134.0-o3.1
 # ```
 #
 # To use external macOS signing, manually dispatch `release_mode=build_unsigned`,
@@ -16,7 +16,7 @@ name: rust-release
 on:
   push:
     tags:
-      - "rust-v*.*.*"
+      - "v*.*.*-o3.*"
   workflow_dispatch:
     inputs:
       release_mode:
@@ -116,11 +116,11 @@ jobs:
           # 1. Must be a tag and match the regex
           [[ "${GITHUB_REF_TYPE}" == "tag" ]] \
             || { echo "❌  Not a tag push"; exit 1; }
-          [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]] \
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-o3\.[0-9]+$ ]] \
             || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format"; exit 1; }
 
           # 2. Extract versions
-          tag_ver="${GITHUB_REF_NAME#rust-v}"
+          tag_ver="${GITHUB_REF_NAME#v}"
           cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml \
                         | sed -E 's/version *= *"([^"]+)".*/\1/')"
 
@@ -1133,8 +1133,8 @@ jobs:
         id: release_name
         run: |
           # Extract the version from the tag name, which is in the format
-          # "rust-v0.1.0".
-          version="${GITHUB_REF_NAME#rust-v}"
+          # "v0.134.0-o3.1".
+          version="${GITHUB_REF_NAME#v}"
           echo "name=${version}" >> $GITHUB_OUTPUT
 
       - name: Determine npm publish settings
@@ -1151,7 +1151,10 @@ jobs:
             exit 0
           fi
 
-          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-o3\.[0-9]+$ ]]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=" >> "$GITHUB_OUTPUT"
+          elif [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
             echo "npm_tag=" >> "$GITHUB_OUTPUT"
           elif [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
@@ -1227,10 +1230,10 @@ jobs:
           body_path: ${{ steps.release_notes.outputs.path }}
           files: dist/**
           overwrite_files: true
-          make_latest: ${{ env.SIGN_MACOS == 'true' && !contains(steps.release_name.outputs.name, '-') }}
+          make_latest: ${{ env.SIGN_MACOS == 'true' && !contains(steps.release_name.outputs.name, '-alpha.') && !contains(steps.release_name.outputs.name, '-beta.') && !contains(steps.release_name.outputs.name, '-rc.') }}
           # Mark as prerelease only when the version has a suffix after x.y.z
           # (e.g. -alpha, -beta). Otherwise publish a normal release.
-          prerelease: ${{ contains(steps.release_name.outputs.name, '-') }}
+          prerelease: ${{ contains(steps.release_name.outputs.name, '-alpha.') || contains(steps.release_name.outputs.name, '-beta.') || contains(steps.release_name.outputs.name, '-rc.') }}
 
       - name: Clean up signed promotion handoff assets
         if: ${{ env.RELEASE_MODE == 'promote_signed' }}
@@ -1295,11 +1298,9 @@ jobs:
             exit 1
           fi
 
-  # Publish to npm using OIDC authentication.
-  # July 31, 2025: https://github.blog/changelog/2025-07-31-npm-trusted-publishing-with-oidc-is-generally-available/
-  # npm docs: https://docs.npmjs.com/trusted-publishers
+  # Publish to npm using the repository NPM_TOKEN secret.
   publish-npm:
-    # Publish to npm for stable releases and alpha pre-releases with numeric suffixes.
+    # Publish to npm for stable o3-codex releases and alpha pre-releases with numeric suffixes.
     # promote_signed intentionally skips build jobs that are ancestors of release;
     # include the !cancelled() status function so Actions does not apply its implicit
     # success() check to the whole dependency chain before evaluating release outputs.
@@ -1313,17 +1314,16 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     permissions:
-      id-token: write # Required for OIDC
       contents: read
 
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          # Node 24 bundles npm >= 11.5.1, which trusted publishing requires.
+          # Use npm bundled with Node 24 for current registry behavior.
           node-version: 24
           registry-url: "https://registry.npmjs.org"
-          scope: "@openai"
+          scope: "@o3dotdev"
 
       - name: Download npm tarballs from release
         env:
@@ -1350,9 +1350,9 @@ jobs:
               --dir dist/npm
           done
 
-      # No NODE_AUTH_TOKEN needed because we use OIDC.
       - name: Publish to npm
         env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.release.outputs.version }}
           NPM_TAG: ${{ needs.release.outputs.npm_tag }}
         run: |
@@ -1366,7 +1366,7 @@ jobs:
           sdk_tarball="dist/npm/codex-sdk-npm-${VERSION}.tgz"
           # Keep this list in sync with CODEX_PLATFORM_PACKAGES in
           # codex-cli/scripts/build_npm_package.py. The root wrapper advances
-          # @openai/codex@latest as soon as it publishes, so every platform
+          # @o3dotdev/codex@latest as soon as it publishes, so every platform
           # package it aliases must already exist in the registry first.
           platform_tarballs=(
             "dist/npm/codex-npm-linux-x64-${VERSION}.tgz"
@@ -1406,7 +1406,7 @@ jobs:
           done
 
           # Publish the platform packages before the root CLI wrapper. The root
-          # wrapper advances @openai/codex@latest, so it should only publish
+          # wrapper advances @o3dotdev/codex@latest, so it should only publish
           # after the optional dependency versions it references exist.
           tarballs=(
             "${platform_tarballs[@]}"
@@ -1436,7 +1436,7 @@ jobs:
                 ;;
             esac
 
-            publish_cmd=(npm publish "${GITHUB_WORKSPACE}/${tarball}")
+            publish_cmd=(npm publish "${GITHUB_WORKSPACE}/${tarball}" --access public)
             if [[ -n "${tag}" ]]; then
               publish_cmd+=(--tag "${tag}")
             fi
@@ -1542,7 +1542,8 @@ jobs:
       ${{
         !cancelled() &&
         needs.release.result == 'success' &&
-        needs.release.outputs.sign_macos == 'true'
+        needs.release.outputs.sign_macos == 'true' &&
+        contains(needs.release.outputs.version, '-alpha.')
       }}
     permissions:
       contents: write
