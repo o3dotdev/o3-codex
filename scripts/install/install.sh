@@ -5,7 +5,7 @@ set -eu
 RELEASE="latest"
 
 BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
-BIN_PATH="$BIN_DIR/codex"
+BIN_PATH="$BIN_DIR/o3-codex"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
 RELEASES_DIR="$STANDALONE_ROOT/releases"
@@ -511,8 +511,8 @@ current_installed_version() {
   return 0
 }
 
-resolve_existing_codex() {
-  command -v codex 2>/dev/null || true
+resolve_existing_o3_codex() {
+  command -v o3-codex 2>/dev/null || true
 }
 
 classify_existing_codex() {
@@ -576,36 +576,36 @@ prompt_yes_no() {
 print_launch_instructions() {
   case "$path_action" in
     added)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && o3-codex"
+      step "Future terminals: open a new terminal and run: o3-codex"
       step "PATH was added to $path_profile"
       ;;
     updated)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && o3-codex"
+      step "Future terminals: open a new terminal and run: o3-codex"
       step "PATH was updated in $path_profile"
       ;;
     configured)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && o3-codex"
+      step "Future terminals: open a new terminal and run: o3-codex"
       step "PATH is already configured in $path_profile"
       ;;
     *)
-      step "Current terminal: codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: o3-codex"
+      step "Future terminals: open a new terminal and run: o3-codex"
       ;;
   esac
 }
 
 maybe_launch_codex_now() {
-  if prompt_yes_no "Start Codex now?"; then
-    step "Launching Codex"
+  if prompt_yes_no "Start o3-codex now?"; then
+    step "Launching o3-codex"
     "$BIN_PATH"
   fi
 }
 
 detect_conflicting_install() {
-  existing_path="$(resolve_existing_codex)"
+  existing_path="$(resolve_existing_o3_codex)"
   manager="$(classify_existing_codex "$existing_path" || true)"
 
   if [ -z "$manager" ]; then
