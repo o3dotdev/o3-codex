@@ -149,7 +149,7 @@ jobs:
       # 2026-03-04: temporarily change releases to use thin LTO because
       # Ubuntu ARM is timing out at 60 minutes.
       CARGO_PROFILE_RELEASE_LTO: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'thin' }}
-      SIGN_MACOS: ${{ github.event_name != 'workflow_dispatch' }}
+      SIGN_MACOS: ${{ github.event_name == 'workflow_dispatch' && inputs.release_mode == 'promote_signed' }}
 
     strategy:
       fail-fast: false
@@ -380,7 +380,7 @@ jobs:
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
 
-      - if: ${{ runner.os == 'macOS' && env.SIGN_MACOS != 'true' }}
+      - if: ${{ runner.os == 'macOS' && env.SIGN_MACOS != 'true' && github.event_name == 'workflow_dispatch' }}
         name: Stage unsigned macOS artifacts
         shell: bash
         run: |
@@ -405,7 +405,7 @@ jobs:
             zstd -T0 -19 --rm "${unsigned_path}"
           done
 
-      - if: ${{ runner.os == 'macOS' && env.SIGN_MACOS != 'true' }}
+      - if: ${{ runner.os == 'macOS' && env.SIGN_MACOS != 'true' && github.event_name == 'workflow_dispatch' }}
         name: Upload unsigned macOS artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -489,7 +489,6 @@ jobs:
           apple-notarization-issuer-id: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
 
       - name: Stage artifacts
-        if: ${{ runner.os != 'macOS' || env.SIGN_MACOS == 'true' }}
         shell: bash
         run: |
           dest="dist/${{ matrix.target }}"
@@ -514,12 +513,11 @@ jobs:
               zstd -T0 -19 -o "$dest/codex-${{ matrix.target }}-bundle.tar.zst"
           fi
 
-          if [[ "${{ matrix.build_dmg }}" == "true" ]]; then
+          if [[ "${{ matrix.build_dmg }}" == "true" && "${SIGN_MACOS}" == "true" ]]; then
             cp target/${{ matrix.target }}/release/codex-${{ matrix.target }}.dmg "$dest/codex-${{ matrix.target }}.dmg"
           fi
 
       - name: Build Codex package archive
-        if: ${{ runner.os != 'macOS' || env.SIGN_MACOS == 'true' }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -584,7 +582,6 @@ jobs:
           if-no-files-found: error
 
       - name: Compress artifacts
-        if: ${{ runner.os != 'macOS' || env.SIGN_MACOS == 'true' }}
         shell: bash
         run: |
           # Path that contains the uncompressed binaries for the current
@@ -621,7 +618,6 @@ jobs:
           done
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        if: ${{ runner.os != 'macOS' || env.SIGN_MACOS == 'true' }}
         with:
           name: ${{ matrix.artifact_name }}
           # Upload the per-binary .zst files, .tar.gz equivalents, and any
@@ -929,7 +925,7 @@ jobs:
       actions: read
     env:
       RELEASE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.release_mode || 'signed' }}
-      SIGN_MACOS: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode == 'promote_signed' }}
+      SIGN_MACOS: ${{ github.event_name == 'workflow_dispatch' && inputs.release_mode == 'promote_signed' }}
       SIGNED_MACOS_ASSET: ${{ inputs.signed_macos_asset }}
       UNSIGNED_RUN_ID: ${{ inputs.unsigned_run_id }}
     outputs:
@@ -1074,7 +1070,7 @@ jobs:
         run: ls -R dist/
 
       - name: Prune artifacts excluded from unsigned macOS release
-        if: ${{ env.SIGN_MACOS == 'false' }}
+        if: ${{ env.RELEASE_MODE == 'build_unsigned' }}
         run: |
           find dist -mindepth 1 -maxdepth 1 -type d \
             ! -name '*-apple-darwin*-unsigned' \
@@ -1145,12 +1141,6 @@ jobs:
           set -euo pipefail
           version="${VERSION}"
 
-          if [[ "${SIGN_MACOS}" != "true" ]]; then
-            echo "should_publish=false" >> "$GITHUB_OUTPUT"
-            echo "npm_tag=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-o3\.[0-9]+$ ]]; then
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
             echo "npm_tag=" >> "$GITHUB_OUTPUT"
@@ -1187,23 +1177,19 @@ jobs:
           fi
 
       - name: Setup pnpm
-        if: ${{ env.SIGN_MACOS == 'true' }}
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
         with:
           run_install: false
 
       - name: Setup Node.js for npm packaging
-        if: ${{ env.SIGN_MACOS == 'true' }}
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 22
 
       - name: Install dependencies
-        if: ${{ env.SIGN_MACOS == 'true' }}
         run: pnpm install --frozen-lockfile
 
       - name: Stage npm packages
-        if: ${{ env.SIGN_MACOS == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.release_name.outputs.name }}
@@ -1217,7 +1203,6 @@ jobs:
             --package codex-sdk
 
       - name: Stage installer scripts
-        if: ${{ env.SIGN_MACOS == 'true' }}
         run: |
           cp scripts/install/install.sh dist/install.sh
           cp scripts/install/install.ps1 dist/install.ps1
@@ -1230,7 +1215,7 @@ jobs:
           body_path: ${{ steps.release_notes.outputs.path }}
           files: dist/**
           overwrite_files: true
-          make_latest: ${{ env.SIGN_MACOS == 'true' && !contains(steps.release_name.outputs.name, '-alpha.') && !contains(steps.release_name.outputs.name, '-beta.') && !contains(steps.release_name.outputs.name, '-rc.') }}
+          make_latest: ${{ !contains(steps.release_name.outputs.name, '-alpha.') && !contains(steps.release_name.outputs.name, '-beta.') && !contains(steps.release_name.outputs.name, '-rc.') }}
           # Mark as prerelease only when the version has a suffix after x.y.z
           # (e.g. -alpha, -beta). Otherwise publish a normal release.
           prerelease: ${{ contains(steps.release_name.outputs.name, '-alpha.') || contains(steps.release_name.outputs.name, '-beta.') || contains(steps.release_name.outputs.name, '-rc.') }}
