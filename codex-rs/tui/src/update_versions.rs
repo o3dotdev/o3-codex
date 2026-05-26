@@ -7,21 +7,26 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
 
 pub(crate) fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::Result<String> {
     latest_tag_name
-        .strip_prefix("rust-v")
+        .strip_prefix("v")
+        .or_else(|| latest_tag_name.strip_prefix("rust-v"))
         .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("Failed to parse latest tag name '{latest_tag_name}'"))
 }
 
 pub(crate) fn is_source_build_version(version: &str) -> bool {
-    parse_version(version) == Some((0, 0, 0))
+    parse_version(version) == Some((0, 0, 0, 0))
 }
 
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut iter = v.trim().split('.');
+fn parse_version(v: &str) -> Option<(u64, u64, u64, u64)> {
+    let (base, fork_release) = match v.trim().split_once("-o3.") {
+        Some((base, fork_release)) => (base, fork_release.parse::<u64>().ok()?),
+        None => (v.trim(), 0),
+    };
+    let mut iter = base.split('.');
     let maj = iter.next()?.parse::<u64>().ok()?;
     let min = iter.next()?.parse::<u64>().ok()?;
     let pat = iter.next()?.parse::<u64>().ok()?;
-    Some((maj, min, pat))
+    Some((maj, min, pat, fork_release))
 }
 
 #[cfg(test)]
@@ -32,6 +37,10 @@ mod tests {
     #[test]
     fn extracts_version_from_latest_tag() {
         assert_eq!(
+            extract_version_from_latest_tag("v1.5.0-o3.1").expect("failed to parse version"),
+            "1.5.0-o3.1"
+        );
+        assert_eq!(
             extract_version_from_latest_tag("rust-v1.5.0").expect("failed to parse version"),
             "1.5.0"
         );
@@ -39,7 +48,7 @@ mod tests {
 
     #[test]
     fn latest_tag_without_prefix_is_invalid() {
-        assert!(extract_version_from_latest_tag("v1.5.0").is_err());
+        assert!(extract_version_from_latest_tag("1.5.0").is_err());
     }
 
     #[test]
@@ -57,6 +66,13 @@ mod tests {
     }
 
     #[test]
+    fn fork_release_comparisons_work() {
+        assert_eq!(is_newer("0.134.0-o3.2", "0.134.0-o3.1"), Some(true));
+        assert_eq!(is_newer("0.134.0-o3.1", "0.134.0-o3.2"), Some(false));
+        assert_eq!(is_newer("0.134.0-o3.1", "0.134.0"), Some(true));
+    }
+
+    #[test]
     fn source_build_version_is_not_checked() {
         assert!(is_source_build_version("0.0.0"));
         assert!(!is_source_build_version("0.1.0"));
@@ -64,7 +80,7 @@ mod tests {
 
     #[test]
     fn whitespace_is_ignored() {
-        assert_eq!(parse_version(" 1.2.3 \n"), Some((1, 2, 3)));
+        assert_eq!(parse_version(" 1.2.3 \n"), Some((1, 2, 3, 0)));
         assert_eq!(is_newer(" 1.2.3 ", "1.2.2"), Some(true));
     }
 }

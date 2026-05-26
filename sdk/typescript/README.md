@@ -2,12 +2,12 @@
 
 Embed the Codex agent in your workflows and apps.
 
-The TypeScript SDK wraps the `codex` CLI from `@openai/codex`. It spawns the CLI and exchanges JSONL events over stdin/stdout.
+The TypeScript SDK wraps the `o3-codex` CLI from `@o3dotdev/codex`. It spawns the CLI and exchanges JSONL events over stdin/stdout.
 
 ## Installation
 
 ```bash
-npm install @openai/codex-sdk
+npm install @o3dotdev/codex-sdk
 ```
 
 Requires Node.js 18+.
@@ -15,7 +15,7 @@ Requires Node.js 18+.
 ## Quickstart
 
 ```typescript
-import { Codex } from "@openai/codex-sdk";
+import { Codex } from "@o3dotdev/codex-sdk";
 
 const codex = new Codex();
 const thread = codex.startThread();
