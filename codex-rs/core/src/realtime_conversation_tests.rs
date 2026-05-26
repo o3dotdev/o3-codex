@@ -8,6 +8,7 @@ use async_channel::bounded;
 use codex_config::config_toml::RealtimeWsVersion;
 use codex_protocol::protocol::RealtimeHandoffRequested;
 use codex_protocol::protocol::RealtimeTranscriptEntry;
+use http::HeaderMap;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -143,7 +144,7 @@ async fn clears_active_handoff_explicitly() {
 #[test]
 fn uses_quicksilver_alpha_header_for_realtime_v1() {
     let headers =
-        realtime_request_headers(Some("session_1"), Some("sk-test"), RealtimeWsVersion::V1)
+        realtime_request_headers(Some("session_1"), HeaderMap::new(), RealtimeWsVersion::V1)
             .expect("headers")
             .expect("headers");
 
@@ -158,7 +159,7 @@ fn uses_quicksilver_alpha_header_for_realtime_v1() {
 #[test]
 fn omits_quicksilver_alpha_header_for_realtime_v2() {
     let headers =
-        realtime_request_headers(Some("session_1"), Some("sk-test"), RealtimeWsVersion::V2)
+        realtime_request_headers(Some("session_1"), HeaderMap::new(), RealtimeWsVersion::V2)
             .expect("headers")
             .expect("headers");
 

@@ -367,10 +367,6 @@ impl ModelClient {
         }
     }
 
-    pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
-        self.state.provider.auth_manager()
-    }
-
     pub(crate) fn set_window_generation(&self, window_generation: u64) {
         self.state
             .window_generation
@@ -526,24 +522,22 @@ impl ModelClient {
         &self,
         sdp: String,
         session_config: ApiRealtimeSessionConfig,
+        api_provider: ApiProvider,
+        api_auth: SharedAuthProvider,
         mut extra_headers: ApiHeaderMap,
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
-        let client_setup = self.current_client_setup().await?;
         if let Some(header_value) = self.generate_attestation_header_for().await {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         let mut sideband_headers = extra_headers.clone();
-        sideband_headers.extend(sideband_websocket_auth_headers(
-            client_setup.api_auth.as_ref(),
-        ));
+        sideband_headers.extend(sideband_websocket_auth_headers(api_auth.as_ref()));
         let transport = ReqwestTransport::new(build_reqwest_client());
-        let response =
-            ApiRealtimeCallClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .create_with_session_and_headers(sdp, session_config, extra_headers)
-                .await
-                .map_err(map_api_error)?;
+        let response = ApiRealtimeCallClient::new(transport, api_provider, api_auth)
+            .create_with_session_and_headers(sdp, session_config, extra_headers)
+            .await
+            .map_err(map_api_error)?;
         Ok(RealtimeWebrtcCallStart {
             sdp: response.sdp,
             call_id: response.call_id,
