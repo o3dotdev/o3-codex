@@ -3,6 +3,7 @@ use anyhow::Result;
 use chrono::Utc;
 use codex_config::config_toml::RealtimeWsVersion;
 use codex_core::test_support::auth_manager_from_auth;
+use codex_login::CODEX_API_KEY_ENV_VAR;
 use codex_login::CodexAuth;
 use codex_login::OPENAI_API_KEY_ENV_VAR;
 use codex_protocol::ThreadId;
@@ -62,10 +63,22 @@ const STARTUP_CONTEXT_OPEN_TAG: &str = "<startup_context>";
 const STARTUP_CONTEXT_CLOSE_TAG: &str = "</startup_context>";
 const REALTIME_BACKEND_PROMPT: &str = include_str!("../../templates/realtime/backend_prompt.md");
 const USER_FIRST_NAME_PLACEHOLDER: &str = "{{ user_first_name }}";
+const O3_CODE_REALTIME_API_KEY_ENV_VAR: &str = "O3_CODE_REALTIME_API_KEY";
+const O3_CODE_REALTIME_BASE_URL_ENV_VAR: &str = "O3_CODE_REALTIME_BASE_URL";
 const MEMORY_PROMPT_PHRASE: &str =
     "You have access to a memory folder with guidance from prior runs.";
 const REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR: &str =
     "CODEX_REALTIME_CONVERSATION_TEST_SUBPROCESS";
+
+#[ctor::ctor]
+fn default_realtime_key_for_conversation_tests() {
+    if std::env::var_os(REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR).is_none() {
+        // SAFETY: this runs before the realtime conversation test binary starts executing tests.
+        unsafe {
+            std::env::set_var(O3_CODE_REALTIME_API_KEY_ENV_VAR, "dummy");
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct RealtimeCallRequestCapture {
@@ -179,7 +192,7 @@ where
 
 fn run_realtime_conversation_test_in_subprocess(
     test_name: &str,
-    openai_api_key: Option<&str>,
+    realtime_api_key: Option<&str>,
 ) -> Result<()> {
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -191,12 +204,13 @@ fn run_realtime_conversation_test_in_subprocess(
     for &key in codex_network_proxy::PROXY_ENV_KEYS {
         command.env_remove(key);
     }
-    match openai_api_key {
-        Some(openai_api_key) => {
-            command.env(OPENAI_API_KEY_ENV_VAR, openai_api_key);
+    command.env_remove(O3_CODE_REALTIME_BASE_URL_ENV_VAR);
+    match realtime_api_key {
+        Some(realtime_api_key) => {
+            command.env(O3_CODE_REALTIME_API_KEY_ENV_VAR, realtime_api_key);
         }
         None => {
-            command.env_remove(OPENAI_API_KEY_ENV_VAR);
+            command.env_remove(O3_CODE_REALTIME_API_KEY_ENV_VAR);
         }
     }
     let output = command.output()?;
@@ -293,6 +307,12 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
 
     let started = wait_for_event_match(&test.codex, |msg| match msg {
         EventMsg::RealtimeConversationStarted(started) => Some(Ok(started.clone())),
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload: RealtimeEvent::Error(message),
+        }) => Some(Err(ErrorEvent {
+            message: message.clone(),
+            codex_error_info: None,
+        })),
         EventMsg::Error(err) => Some(Err(err.clone())),
         _ => None,
     })
@@ -431,6 +451,12 @@ async fn conversation_start_defaults_to_v2_and_gpt_realtime_1_5() -> Result<()> 
 
     let started = wait_for_event_match(&test.codex, |msg| match msg {
         EventMsg::RealtimeConversationStarted(started) => Some(Ok(started.clone())),
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload: RealtimeEvent::Error(message),
+        }) => Some(Err(ErrorEvent {
+            message: message.clone(),
+            codex_error_info: None,
+        })),
         EventMsg::Error(err) => Some(Err(err.clone())),
         _ => None,
     })
@@ -523,6 +549,12 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
     // normal realtime event stream from the joined sideband WebSocket.
     let created = wait_for_event_match(&test.codex, |msg| match msg {
         EventMsg::RealtimeConversationSdp(created) => Some(Ok(created.clone())),
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload: RealtimeEvent::Error(message),
+        }) => Some(Err(ErrorEvent {
+            message: message.clone(),
+            codex_error_info: None,
+        })),
         EventMsg::Error(err) => Some(Err(err.clone())),
         _ => None,
     })
@@ -819,32 +851,32 @@ async fn conversation_webrtc_sideband_connect_failure_closes_with_error() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn conversation_start_uses_openai_env_key_fallback_with_chatgpt_auth() -> Result<()> {
+async fn conversation_start_uses_realtime_env_key_with_chatgpt_auth() -> Result<()> {
     if std::env::var_os(REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR).is_none() {
         return run_realtime_conversation_test_in_subprocess(
-            "suite::realtime_conversation::conversation_start_uses_openai_env_key_fallback_with_chatgpt_auth",
+            "suite::realtime_conversation::conversation_start_uses_realtime_env_key_with_chatgpt_auth",
             Some("env-realtime-key"),
         );
     }
 
     skip_if_no_network!(Ok(()));
 
-    let server = start_websocket_server(vec![
-        vec![],
-        vec![vec![json!({
-            "type": "session.updated",
-            "session": { "id": "sess_env", "instructions": "backend prompt" }
-        })]],
-    ])
+    let server = start_websocket_server(vec![vec![vec![json!({
+        "type": "session.updated",
+        "session": { "id": "sess_env", "instructions": "backend prompt" }
+    })]]])
     .await;
 
-    let mut builder = test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    let test = builder.build_with_websocket_server(&server).await?;
-    assert!(
-        server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
-            .await
-    );
+    let realtime_base_url = server.uri().to_string();
+    let model_server = start_mock_server().await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.experimental_realtime_ws_base_url = Some(realtime_base_url);
+            config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
+            config.realtime.version = RealtimeWsVersion::V1;
+        });
+    let test = builder.build(&model_server).await?;
 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
@@ -858,6 +890,12 @@ async fn conversation_start_uses_openai_env_key_fallback_with_chatgpt_auth() -> 
 
     let started = wait_for_event_match(&test.codex, |msg| match msg {
         EventMsg::RealtimeConversationStarted(started) => Some(Ok(started.clone())),
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload: RealtimeEvent::Error(message),
+        }) => Some(Err(ErrorEvent {
+            message: message.clone(),
+            codex_error_info: None,
+        })),
         EventMsg::Error(err) => Some(Err(err.clone())),
         _ => None,
     })
@@ -879,7 +917,7 @@ async fn conversation_start_uses_openai_env_key_fallback_with_chatgpt_auth() -> 
     assert_eq!(session_updated, "sess_env");
 
     assert_eq!(
-        server.handshakes()[1].header("authorization").as_deref(),
+        server.single_handshake().header("authorization").as_deref(),
         Some("Bearer env-realtime-key")
     );
 
@@ -924,6 +962,12 @@ async fn conversation_transport_close_emits_closed_event() -> Result<()> {
 
     let started = wait_for_event_match(&test.codex, |msg| match msg {
         EventMsg::RealtimeConversationStarted(started) => Some(Ok(started.clone())),
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload: RealtimeEvent::Error(message),
+        }) => Some(Err(ErrorEvent {
+            message: message.clone(),
+            codex_error_info: None,
+        })),
         EventMsg::Error(err) => Some(Err(err.clone())),
         _ => None,
     })
@@ -992,7 +1036,7 @@ async fn conversation_start_preflight_failure_emits_realtime_error_only() -> Res
     if std::env::var_os(REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR).is_none() {
         return run_realtime_conversation_test_in_subprocess(
             "suite::realtime_conversation::conversation_start_preflight_failure_emits_realtime_error_only",
-            /*openai_api_key*/ None,
+            /*realtime_api_key*/ None,
         );
     }
 
@@ -1019,7 +1063,10 @@ async fn conversation_start_preflight_failure_emits_realtime_error_only() -> Res
         _ => None,
     })
     .await;
-    assert_eq!(err, "realtime conversation requires API key auth");
+    assert_eq!(
+        err,
+        "realtime conversation requires O3_CODE_REALTIME_API_KEY"
+    );
 
     let closed = timeout(Duration::from_millis(200), async {
         wait_for_event_match(&test.codex, |msg| match msg {
@@ -1030,6 +1077,69 @@ async fn conversation_start_preflight_failure_emits_realtime_error_only() -> Res
     })
     .await;
     assert!(closed.is_err(), "preflight failure should not emit closed");
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_start_missing_realtime_key_ignores_general_api_key_fallbacks() -> Result<()> {
+    if std::env::var_os(REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR).is_none() {
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg(
+                "suite::realtime_conversation::conversation_start_missing_realtime_key_ignores_general_api_key_fallbacks",
+            )
+            .env(REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR, "1")
+            .env(OPENAI_API_KEY_ENV_VAR, "openai-general-key")
+            .env(CODEX_API_KEY_ENV_VAR, "codex-general-key")
+            .env_remove(O3_CODE_REALTIME_API_KEY_ENV_VAR)
+            .env_remove(O3_CODE_REALTIME_BASE_URL_ENV_VAR);
+        for &key in codex_network_proxy::PROXY_ENV_KEYS {
+            command.env_remove(key);
+        }
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "subprocess fallback test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    skip_if_no_network!(Ok(()));
+
+    let server = start_websocket_server(vec![]).await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("stored-api-key"))
+        .with_config(|config| {
+            config.model_provider.env_key = Some("PATH".to_string());
+        });
+    let test = builder.build_with_websocket_server(&server).await?;
+
+    test.codex
+        .submit(Op::RealtimeConversationStart(ConversationStartParams {
+            output_modality: RealtimeOutputModality::Audio,
+            prompt: Some(Some("backend prompt".to_string())),
+            realtime_session_id: None,
+            transport: None,
+            voice: None,
+        }))
+        .await?;
+
+    let err = wait_for_event_match(&test.codex, |msg| match msg {
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload: RealtimeEvent::Error(message),
+        }) => Some(message.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        err,
+        "realtime conversation requires O3_CODE_REALTIME_API_KEY"
+    );
 
     server.shutdown().await;
     Ok(())
