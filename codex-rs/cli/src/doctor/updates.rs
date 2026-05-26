@@ -22,7 +22,8 @@ use super::npm_global_root_check;
 use super::run_command;
 
 const VERSION_FILE_NAME: &str = "version.json";
-const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
+const GITHUB_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/o3dotdev/o3-codex/releases/latest";
 const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
 
 /// Builds the update-health row for the current installation.
@@ -131,8 +132,8 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
 
 fn update_action_label(context: &InstallContext) -> &'static str {
     match &context.method {
-        InstallMethod::Npm => "npm install -g @openai/codex",
-        InstallMethod::Bun => "bun install -g @openai/codex",
+        InstallMethod::Npm => "npm install -g @o3dotdev/codex",
+        InstallMethod::Bun => "bun install -g @o3dotdev/codex",
         InstallMethod::Brew => "brew upgrade --cask codex",
         InstallMethod::Standalone { .. } => "standalone installer",
         InstallMethod::Other => "manual or unknown",
@@ -157,7 +158,8 @@ fn fetch_latest_github_release_version() -> Result<String, String> {
 
     let info = http_get_json::<ReleaseInfo>(GITHUB_LATEST_RELEASE_URL)?;
     info.tag_name
-        .strip_prefix("rust-v")
+        .strip_prefix("v")
+        .or_else(|| info.tag_name.strip_prefix("rust-v"))
         .map(str::to_string)
         .ok_or_else(|| format!("failed to parse latest tag {}", info.tag_name))
 }
@@ -186,12 +188,16 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
     }
 }
 
-fn parse_version(value: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = value.trim().split('.');
+fn parse_version(value: &str) -> Option<(u64, u64, u64, u64)> {
+    let (base, fork_release) = match value.trim().split_once("-o3.") {
+        Some((base, fork_release)) => (base, fork_release.parse::<u64>().ok()?),
+        None => (value.trim(), 0),
+    };
+    let mut parts = base.split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next()?.parse::<u64>().ok()?;
     let patch = parts.next()?.parse::<u64>().ok()?;
-    Some((major, minor, patch))
+    Some((major, minor, patch, fork_release))
 }
 
 #[derive(Deserialize)]
@@ -221,7 +227,7 @@ mod tests {
                 method: InstallMethod::Npm,
                 package_layout: None,
             }),
-            "npm install -g @openai/codex"
+            "npm install -g @o3dotdev/codex"
         );
         assert_eq!(
             update_action_label(&InstallContext {
