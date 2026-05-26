@@ -8,50 +8,52 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::DEFAULT_LIST_MAX_RESULTS;
-use crate::LIST_TOOL_NAME;
-use crate::MAX_LIST_RESULTS;
-use crate::backend::ListMemoriesRequest;
-use crate::backend::ListMemoriesResponse;
+use crate::ADD_AD_HOC_NOTE_TOOL_NAME;
+use crate::backend::AddAdHocMemoryNoteRequest;
+use crate::backend::AddAdHocMemoryNoteResponse;
 use crate::backend::MemoriesBackend;
 use crate::metrics::record_tool_call;
-use crate::metrics::scope_from_optional_path;
-use crate::metrics::truncated_tag;
 
 use super::backend_error_to_function_call;
-use super::clamp_max_results;
 use super::memory_function_tool;
 use super::memory_tool_name;
 use super::parse_args;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ListArgs {
-    path: Option<String>,
-    cursor: Option<String>,
-    #[schemars(range(min = 1))]
-    max_results: Option<usize>,
+struct AddAdHocNoteArgs {
+    /// Name of the note file to create, in
+    /// YYYY-MM-DDTHH-MM-SS-<slug>.md format. The slug must use only lowercase
+    /// ASCII letters, digits, and hyphens.
+    #[schemars(
+        length(min = 24, max = 128),
+        regex(pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,79}\.md$")
+    )]
+    filename: String,
+    /// Verbatim Markdown note to append to the ad-hoc memory notes.
+    #[schemars(length(min = 1))]
+    note: String,
 }
 
 #[derive(Clone)]
-pub(super) struct ListTool<B> {
+pub(super) struct AddAdHocNoteTool<B> {
     pub(super) backend: B,
     pub(super) metrics_client: Option<MetricsClient>,
 }
 
 #[async_trait::async_trait]
-impl<B> ToolExecutor<ToolCall> for ListTool<B>
+impl<B> ToolExecutor<ToolCall> for AddAdHocNoteTool<B>
 where
     B: MemoriesBackend,
 {
     fn tool_name(&self) -> ToolName {
-        memory_tool_name(LIST_TOOL_NAME)
+        memory_tool_name(ADD_AD_HOC_NOTE_TOOL_NAME)
     }
 
     fn spec(&self) -> ToolSpec {
-        memory_function_tool::<ListArgs, ListMemoriesResponse>(
-            LIST_TOOL_NAME,
-            "List immediate files and directories under a path in the Codex memories store.",
+        memory_function_tool::<AddAdHocNoteArgs, AddAdHocMemoryNoteResponse>(
+            ADD_AD_HOC_NOTE_TOOL_NAME,
+            "Create one append-only ad-hoc memory note after the user explicitly asks Codex to remember, forget, or update something.",
         )
     }
 
@@ -61,25 +63,19 @@ where
     ) -> Result<Box<dyn codex_extension_api::ToolOutput>, codex_extension_api::FunctionCallError>
     {
         let backend = self.backend.clone();
-        let args: ListArgs = parse_args(&call)?;
-        let scope = scope_from_optional_path(args.path.as_deref(), "root");
+        let args: AddAdHocNoteArgs = parse_args(&call)?;
         let response = backend
-            .list(ListMemoriesRequest {
-                path: args.path,
-                cursor: args.cursor,
-                max_results: clamp_max_results(
-                    args.max_results,
-                    DEFAULT_LIST_MAX_RESULTS,
-                    MAX_LIST_RESULTS,
-                ),
+            .add_ad_hoc_note(AddAdHocMemoryNoteRequest {
+                filename: args.filename,
+                note: args.note,
             })
             .await;
         record_tool_call(
             self.metrics_client.as_ref(),
-            LIST_TOOL_NAME,
-            scope,
+            ADD_AD_HOC_NOTE_TOOL_NAME,
+            "ad_hoc_notes",
             response.is_ok(),
-            truncated_tag(response.as_ref().ok().map(|response| response.truncated)),
+            "not_applicable",
         );
         let response = response.map_err(backend_error_to_function_call)?;
         Ok(Box::new(JsonToolOutput::new(json!(response))))
