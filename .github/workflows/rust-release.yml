@@ -867,6 +867,9 @@ jobs:
   build-windows:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
     needs: tag-check
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/rust-release-windows.yml
     with:
       release-lto: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
