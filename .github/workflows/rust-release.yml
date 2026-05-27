@@ -12,6 +12,11 @@
 # with `unsigned_run_id` and `signed_macos_asset`. The signed handoff archive
 # should contain target or artifact directories such as `aarch64-apple-darwin/`
 # with signed binaries.
+#
+# Local macOS arm64-only releases use `scripts/release_macos_arm64.py` instead
+# of this workflow. That path publishes GitHub Release assets only and
+# intentionally skips npm, PyPI, DotSlash, WinGet, Linux, Windows, Intel macOS,
+# and desktop `Codex.app` packaging.
 
 name: rust-release
 on:
