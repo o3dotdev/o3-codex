@@ -13,7 +13,15 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Skip macOS Bazel lint without BuildBuddy
+      if: ${{ runner.os == 'macOS' && inputs.buildbuddy-api-key == '' }}
+      shell: bash
+      run: |
+        echo "Skipping argument-comment-lint Bazel job because BUILDBUDDY_API_KEY is not configured."
+        echo "macOS Bazel CI depends on BuildBuddy/cache for the pinned Apple SDK package; direct Apple downloads can return 403 on hosted runners."
+
     - uses: ./.github/actions/setup-bazel-ci
+      if: ${{ runner.os != 'macOS' || inputs.buildbuddy-api-key != '' }}
       with:
         target: ${{ inputs.target }}
         install-test-prereqs: true
@@ -26,7 +34,7 @@ runs:
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
 
     - name: Run argument comment lint on codex-rs via Bazel
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ runner.os != 'Windows' && (runner.os != 'macOS' || inputs.buildbuddy-api-key != '') }}
       env:
         BUILDBUDDY_API_KEY: ${{ inputs.buildbuddy-api-key }}
       shell: bash
