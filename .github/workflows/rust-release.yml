@@ -179,31 +179,6 @@ jobs:
             artifact_name: x86_64-apple-darwin-app-server
             binaries: "codex-app-server"
             build_dmg: "false"
-          # Release artifacts intentionally ship MUSL-linked Linux binaries.
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            bundle: primary
-            artifact_name: x86_64-unknown-linux-musl
-            binaries: "codex codex-responses-api-proxy bwrap"
-            build_dmg: "false"
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            bundle: app-server
-            artifact_name: x86_64-unknown-linux-musl-app-server
-            binaries: "codex-app-server"
-            build_dmg: "false"
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            bundle: primary
-            artifact_name: aarch64-unknown-linux-musl
-            binaries: "codex codex-responses-api-proxy bwrap"
-            build_dmg: "false"
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            bundle: app-server
-            artifact_name: aarch64-unknown-linux-musl-app-server
-            binaries: "codex-app-server"
-            build_dmg: "false"
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -869,7 +844,7 @@ jobs:
             codex-rs/dist/${{ matrix.target }}/*
 
   build-windows:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+    if: ${{ vars.ENABLE_LINUX_WINDOWS_CI == 'true' }}
     needs: tag-check
     permissions:
       contents: read
@@ -920,7 +895,7 @@ jobs:
             (github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed') &&
             needs.build.result == 'success' &&
             needs.stage-signed-macos.result == 'skipped' &&
-            needs.build-windows.result == 'success' &&
+            needs.build-windows.result == 'skipped' &&
             needs.argument-comment-lint-release-assets.result == 'success' &&
             needs.zsh-release-assets.result == 'success'
           )
@@ -1200,6 +1175,7 @@ jobs:
       - name: Stage npm packages
         env:
           GH_TOKEN: ${{ github.token }}
+          CODEX_NPM_PLATFORM_FILTERS: darwin-x64,darwin-arm64
           RELEASE_VERSION: ${{ steps.release_name.outputs.name }}
         run: |
           workflow_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -1330,9 +1306,7 @@ jobs:
           mkdir -p dist/npm
           patterns=(
             "codex-npm-${version}.tgz"
-            "codex-npm-linux-*-${version}.tgz"
             "codex-npm-darwin-*-${version}.tgz"
-            "codex-npm-win32-*-${version}.tgz"
             "codex-responses-api-proxy-npm-${version}.tgz"
             "codex-sdk-npm-${version}.tgz"
           )
@@ -1362,12 +1336,8 @@ jobs:
           # @o3dotdev/codex@latest as soon as it publishes, so every platform
           # package it aliases must already exist in the registry first.
           platform_tarballs=(
-            "dist/npm/codex-npm-linux-x64-${VERSION}.tgz"
-            "dist/npm/codex-npm-linux-arm64-${VERSION}.tgz"
             "dist/npm/codex-npm-darwin-x64-${VERSION}.tgz"
             "dist/npm/codex-npm-darwin-arm64-${VERSION}.tgz"
-            "dist/npm/codex-npm-win32-x64-${VERSION}.tgz"
-            "dist/npm/codex-npm-win32-arm64-${VERSION}.tgz"
           )
 
           for required_tarball in "${platform_tarballs[@]}" "${root_tarball}"; do
@@ -1415,7 +1385,7 @@ jobs:
             tag=""
 
             case "${filename}" in
-              codex-npm-linux-*-"${VERSION}".tgz|codex-npm-darwin-*-"${VERSION}".tgz|codex-npm-win32-*-"${VERSION}".tgz)
+              codex-npm-darwin-*-"${VERSION}".tgz)
                 platform="${filename#codex-npm-}"
                 platform="${platform%-${VERSION}.tgz}"
                 tag="${prefix}${platform}"
@@ -1507,6 +1477,7 @@ jobs:
     # '-' in the semver string (e.g., 1.2.3-alpha.1).
     if: >-
       ${{
+        vars.ENABLE_LINUX_WINDOWS_CI == 'true' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         needs.release.outputs.sign_macos == 'true' &&

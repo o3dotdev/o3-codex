@@ -9,6 +9,7 @@ env:
 
 jobs:
   linux:
+    if: ${{ vars.ENABLE_LINUX_WINDOWS_CI == 'true' }}
     name: Build zsh (Linux) - ${{ matrix.variant }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30

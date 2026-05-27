@@ -7,6 +7,7 @@ on:
 
 jobs:
   python-sdk:
+    if: ${{ vars.ENABLE_LINUX_WINDOWS_CI == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -40,6 +41,7 @@ jobs:
             '
 
   sdks:
+    if: ${{ vars.ENABLE_LINUX_WINDOWS_CI == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

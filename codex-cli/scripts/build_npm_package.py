@@ -65,8 +65,25 @@ CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
     },
 }
 
+
+def enabled_platform_packages() -> list[str]:
+    platform_filters = {
+        item.strip()
+        for item in os.environ.get("CODEX_NPM_PLATFORM_FILTERS", "").split(",")
+        if item.strip()
+    }
+    if not platform_filters:
+        return list(CODEX_PLATFORM_PACKAGES)
+
+    return [
+        package_name
+        for package_name, package_config in CODEX_PLATFORM_PACKAGES.items()
+        if package_config["npm_tag"] in platform_filters
+    ]
+
+
 PACKAGE_EXPANSIONS: dict[str, list[str]] = {
-    "codex": ["codex", *CODEX_PLATFORM_PACKAGES],
+    "codex": ["codex", *enabled_platform_packages()],
 }
 
 PACKAGE_NATIVE_COMPONENTS: dict[str, list[str]] = {

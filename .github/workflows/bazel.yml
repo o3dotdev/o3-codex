@@ -17,10 +17,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 jobs:
   test:
-    # PRs use the sharded Windows cross-compiled test jobs below. Post-merge
-    # pushes to main also run the native Windows test job for broader Windows
-    # signal without putting PR latency back on the critical path. Cargo CI
-    # owns V8/code-mode test coverage for now.
+    # Temporarily keep Bazel validation to macOS only for the fork.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -31,18 +28,6 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-15-intel
             target: x86_64-apple-darwin
-
-          # Linux
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-          # 2026-02-27 Bazel tests have been flaky on arm in CI.
-          # Disable until we can investigate and stabilize them.
-          # - os: ubuntu-24.04-arm
-          #   target: aarch64-unknown-linux-musl
-          # - os: ubuntu-24.04-arm
-          #   target: aarch64-unknown-linux-gnu
 
     runs-on: ${{ matrix.os }}
 
@@ -129,6 +114,7 @@ jobs:
           key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
 
   test-windows-shard:
+    if: ${{ vars.ENABLE_LINUX_WINDOWS_CI == 'true' }}
     # Split the Windows Bazel test leg across separate Windows
     # hosts. Each shard still uses Linux RBE for build actions, but the test
     # execution itself happens on its own Windows runner.
@@ -226,7 +212,7 @@ jobs:
   test-windows:
     # Preserve the existing required-check surface while the real work happens
     # in the sharded Windows jobs above.
-    if: always()
+    if: ${{ vars.ENABLE_LINUX_WINDOWS_CI == 'true' }}
     needs: test-windows-shard
     runs-on: ubuntu-24.04
     name: Bazel test on windows-latest for x86_64-pc-windows-gnullvm
@@ -244,7 +230,7 @@ jobs:
     # Native Windows Bazel tests are slower and frequently approach the
     # 30-minute PR budget. Run this only for post-merge commits to main and give
     # it a larger timeout.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ vars.ENABLE_LINUX_WINDOWS_CI == 'true' }}
     timeout-minutes: 40
     runs-on: windows-latest
     name: Bazel test on windows-latest for x86_64-pc-windows-gnullvm (native main)
@@ -322,16 +308,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Keep Linux lint coverage on x64 and add the arm64 macOS path that
-          # the Bazel test job already exercises. Add Windows gnullvm as well
-          # so PRs get Bazel-native lint signal on the same Windows toolchain
-          # that the Bazel test job uses.
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-gnullvm
     runs-on: ${{ matrix.os }}
     name: Bazel clippy on ${{ matrix.os }} for ${{ matrix.target }}
 
@@ -416,12 +394,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-gnullvm
     runs-on: ${{ matrix.os }}
     name: Verify release build on ${{ matrix.os }} for ${{ matrix.target }}
 

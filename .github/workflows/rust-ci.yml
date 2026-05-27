@@ -7,7 +7,7 @@ jobs:
   # --- Detect what changed so the fast PR workflow only runs relevant jobs ----
   changed:
     name: Detect changed areas
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     outputs:
       argument_comment_lint: ${{ steps.detect.outputs.argument_comment_lint }}
       argument_comment_lint_package: ${{ steps.detect.outputs.argument_comment_lint_package }}
@@ -56,7 +56,7 @@ jobs:
   # --- Fast Cargo-native PR checks -------------------------------------------
   general:
     name: Format / etc
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
     defaults:
@@ -80,7 +80,7 @@ jobs:
 
   cargo_shear:
     name: cargo shear
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
     defaults:
@@ -100,7 +100,7 @@ jobs:
 
   argument_comment_lint_package:
     name: Argument comment lint package
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     needs: changed
     if: ${{ needs.changed.outputs.argument_comment_lint_package == 'true' }}
     env:
@@ -158,14 +158,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            runner: ubuntu-24.04
-            timeout_minutes: 30
           - name: macOS
             runner: macos-15
-            timeout_minutes: 30
-          - name: Windows
-            runner: windows-2025
             timeout_minutes: 30
     steps:
       - name: Check whether argument comment lint should run
@@ -206,7 +200,7 @@ jobs:
         argument_comment_lint_prebuilt,
       ]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     steps:
       - name: Summarize
         shell: bash

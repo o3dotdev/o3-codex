@@ -63,30 +63,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64
-            sandbox: false
-            target: x86_64-unknown-linux-gnu
-            variant: release
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64
-            sandbox: true
-            target: x86_64-unknown-linux-gnu
-            variant: ptrcomp-sandbox
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64
-            sandbox: false
-            target: aarch64-unknown-linux-gnu
-            variant: release
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64
-            sandbox: true
-            target: aarch64-unknown-linux-gnu
-            variant: ptrcomp-sandbox
           - runner: macos-15-intel
             bazel_config: ci-macos
             platform: macos_amd64
@@ -110,30 +86,6 @@ jobs:
             platform: macos_arm64
             sandbox: true
             target: aarch64-apple-darwin
-            variant: ptrcomp-sandbox
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64_musl
-            sandbox: false
-            target: x86_64-unknown-linux-musl
-            variant: release
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64_musl
-            sandbox: false
-            target: aarch64-unknown-linux-musl
-            variant: release
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64_musl
-            sandbox: true
-            target: x86_64-unknown-linux-musl
-            variant: ptrcomp-sandbox
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64_musl
-            sandbox: true
-            target: aarch64-unknown-linux-musl
             variant: ptrcomp-sandbox
 
     steps:
