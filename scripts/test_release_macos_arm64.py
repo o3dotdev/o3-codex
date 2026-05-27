@@ -62,6 +62,8 @@ class ReleaseMacosArm64Test(unittest.TestCase):
         self.assertEqual(paths.release_dir, paths.output_dir / "build")
         self.assertEqual(paths.asset_dir, paths.output_dir / "assets")
         self.assertEqual(paths.package_dir, paths.output_dir / "packages")
+        self.assertEqual(paths.notary_dir, paths.output_dir / "notary")
+        self.assertEqual(paths.notary_state_file, paths.output_dir / "notary/submissions.json")
         self.assertEqual(paths.notes_file, paths.output_dir / "release-notes.md")
 
     def test_arg_defaults_target_o3_release_repo_and_branch(self) -> None:
@@ -147,6 +149,92 @@ class ReleaseMacosArm64Test(unittest.TestCase):
     def test_required_string_reports_env_fallback(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "APPLE_CERTIFICATE_PASSWORD"):
             release.required_string(None, "APPLE_CERTIFICATE_PASSWORD")
+
+    def test_redact_command_hides_sensitive_values(self) -> None:
+        self.assertEqual(
+            release.redact_command(
+                [
+                    "xcrun",
+                    "notarytool",
+                    "info",
+                    "submission-id",
+                    "--key",
+                    "/secure/AuthKey.p8",
+                    "--key-id",
+                    "KEYID",
+                    "--issuer",
+                    "ISSUER",
+                ]
+            ),
+            [
+                "xcrun",
+                "notarytool",
+                "info",
+                "submission-id",
+                "--key",
+                "<redacted>",
+                "--key-id",
+                "<redacted>",
+                "--issuer",
+                "<redacted>",
+            ],
+        )
+        self.assertEqual(
+            release.redact_command(["ditto", "-c", "-k", "--keepParent", "src", "dest"]),
+            ["ditto", "-c", "-k", "--keepParent", "src", "dest"],
+        )
+        self.assertEqual(
+            release.redact_command(["security", "set-key-partition-list", "-k", "secret"]),
+            ["security", "set-key-partition-list", "-k", "<redacted>"],
+        )
+
+    def test_positive_int_arg_rejects_non_positive_values(self) -> None:
+        self.assertEqual(release.positive_int_arg("30"), 30)
+        with self.assertRaisesRegex(Exception, "positive integer"):
+            release.positive_int_arg("0")
+
+    def test_notary_state_round_trips_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "notary" / "submissions.json"
+            state = release.load_notary_state(state_file)
+            release.set_notary_submission(
+                state,
+                "codex",
+                {
+                    "id": "submission-id",
+                    "binary": "codex",
+                    "binary_sha256": "abc",
+                    "status": release.IN_PROGRESS_NOTARY_STATUS,
+                },
+            )
+            release.save_notary_state(state_file, state, dry_run=False)
+
+            loaded = release.load_notary_state(state_file)
+
+        self.assertEqual(loaded, state)
+
+    def test_resumable_notary_submission_requires_matching_archive_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = release.release_paths("0.0.0-o3.0", Path(temp_dir) / "out", None)
+            paths.notary_dir.mkdir(parents=True)
+            archive = paths.notary_dir / "codex.zip"
+            archive.write_text("signed archive", encoding="utf-8")
+            state = release.load_notary_state(Path(temp_dir) / "missing.json")
+            release.set_notary_submission(
+                state,
+                "codex",
+                {
+                    "id": "submission-id",
+                    "binary": "codex",
+                    "archive": str(archive),
+                    "archive_sha256": release.sha256_file(archive),
+                    "status": release.IN_PROGRESS_NOTARY_STATUS,
+                },
+            )
+
+            self.assertIsNotNone(release.resumable_notary_submission(state, "codex", paths))
+            archive.write_text("changed archive", encoding="utf-8")
+            self.assertIsNone(release.resumable_notary_submission(state, "codex", paths))
 
     def test_replace_workspace_version_updates_workspace_package_only(self) -> None:
         cargo_toml = """

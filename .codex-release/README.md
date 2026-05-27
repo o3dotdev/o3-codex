@@ -13,3 +13,7 @@ Typical local files:
 The release runner automatically reads `.codex-release/release.env` when it
 exists. Keep real certificate passwords, keys, and local config in ignored files
 under this directory.
+
+Notarization submission state is written under the selected release output
+directory, not here, so no-publish runs can be resumed with the same
+`--output-dir`.

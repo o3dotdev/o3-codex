@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import platform
 import re
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,11 @@ VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-o3\.[0-9]+$")
 WORKSPACE_VERSION_RE = re.compile(
     r"(?ms)^(\[workspace\.package\]\s.*?^version\s*=\s*)\"[^\"]+\""
 )
+DEFAULT_NOTARY_TIMEOUT_SECONDS = 30 * 60
+DEFAULT_NOTARY_POLL_INTERVAL_SECONDS = 30
+DEFAULT_NOTARY_SUBMIT_ATTEMPTS = 3
+IN_PROGRESS_NOTARY_STATUS = "In Progress"
+ACCEPTED_NOTARY_STATUS = "Accepted"
 
 # Keep this path separate from product documentation. This is maintainer-only
 # release tooling for the repository.
@@ -74,7 +81,16 @@ class ReleasePaths:
     release_dir: Path
     asset_dir: Path
     package_dir: Path
+    notary_dir: Path
+    notary_state_file: Path
     notes_file: Path
+
+
+@dataclass(frozen=True)
+class NotarizationOptions:
+    timeout_seconds: int
+    poll_interval_seconds: int
+    submit_attempts: int
 
 
 @dataclass(frozen=True)
@@ -88,13 +104,13 @@ class CommandRunner:
         cwd: Path = REPO_ROOT,
         env: Mapping[str, str] | None = None,
     ) -> None:
-        print("+ " + shell_join(cmd), flush=True)
+        print("+ " + shell_join(redact_command(cmd)), flush=True)
         if self.dry_run:
             return
         subprocess.run(cmd, cwd=cwd, env=dict(env) if env is not None else None, check=True)
 
     def output(self, cmd: list[str], *, cwd: Path = REPO_ROOT) -> str:
-        print("+ " + shell_join(cmd), flush=True)
+        print("+ " + shell_join(redact_command(cmd)), flush=True)
         if self.dry_run:
             return ""
         return subprocess.check_output(cmd, cwd=cwd, text=True)
@@ -162,6 +178,42 @@ def parse_args() -> argparse.Namespace:
         help="Optional release notes file. Defaults to generated local macOS arm64 notes.",
     )
     parser.add_argument(
+        "--notary-timeout-seconds",
+        type=positive_int_arg,
+        default=env_positive_int(
+            "APPLE_NOTARIZATION_TIMEOUT_SECONDS",
+            DEFAULT_NOTARY_TIMEOUT_SECONDS,
+        ),
+        help=(
+            "Maximum seconds to wait for each Apple notarization submission before "
+            "saving state and exiting. Set APPLE_NOTARIZATION_TIMEOUT_SECONDS to default locally."
+        ),
+    )
+    parser.add_argument(
+        "--notary-poll-interval-seconds",
+        type=positive_int_arg,
+        default=env_positive_int(
+            "APPLE_NOTARIZATION_POLL_INTERVAL_SECONDS",
+            DEFAULT_NOTARY_POLL_INTERVAL_SECONDS,
+        ),
+        help=(
+            "Seconds between Apple notarization status polls. "
+            "Set APPLE_NOTARIZATION_POLL_INTERVAL_SECONDS to default locally."
+        ),
+    )
+    parser.add_argument(
+        "--notary-submit-attempts",
+        type=positive_int_arg,
+        default=env_positive_int(
+            "APPLE_NOTARIZATION_SUBMIT_ATTEMPTS",
+            DEFAULT_NOTARY_SUBMIT_ATTEMPTS,
+        ),
+        help=(
+            "Number of attempts for transient notarytool submit/status command failures. "
+            "Set APPLE_NOTARIZATION_SUBMIT_ATTEMPTS to default locally."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate inputs and print planned commands without signing, tagging, or uploading.",
@@ -195,6 +247,11 @@ def main() -> int:
     runner = CommandRunner(dry_run=args.dry_run)
     credentials = resolve_credentials(args, require=not args.dry_run)
     paths = release_paths(args.version, args.output_dir, args.notes_file)
+    notary_options = NotarizationOptions(
+        timeout_seconds=args.notary_timeout_seconds,
+        poll_interval_seconds=args.notary_poll_interval_seconds,
+        submit_attempts=args.notary_submit_attempts,
+    )
 
     validate_host(dry_run=args.dry_run)
     validate_required_tools(REQUIRED_TOOLS)
@@ -208,30 +265,40 @@ def main() -> int:
         skip_version_update=args.skip_version_update,
     )
 
-    if not args.skip_version_update:
+    if args.create_github_release and not args.skip_version_update:
         update_workspace_version(args.version, dry_run=args.dry_run)
         commit_version_bump(runner, args.version)
-    else:
+    elif args.skip_version_update:
         validate_current_workspace_version(args.version)
+    else:
+        print(
+            "No-publish run: leaving workspace version unchanged; "
+            "pass --create-github-release to commit the release version bump.",
+            flush=True,
+        )
 
     tag = release_tag(args.version)
-    ensure_tag_absent(runner, tag, remote=args.remote)
+    if args.create_github_release:
+        ensure_tag_absent(runner, tag, remote=args.remote)
     build_binaries(runner)
     if not args.dry_run:
         prepare_release_dirs(paths)
 
     with signing_keychain(runner, credentials) as identity:
-        sign_and_notarize_binaries(runner, credentials, identity)
+        sign_and_notarize_binaries(runner, credentials, identity, paths, notary_options)
 
     build_release_assets(runner, args.version, paths)
     create_release_notes(args.version, paths.notes_file, source=args.notes_file, dry_run=args.dry_run)
-    create_local_tag(runner, tag, args.version)
 
     assets = release_assets(paths.asset_dir, dry_run=args.dry_run)
     if args.create_github_release:
+        create_local_tag(runner, tag, args.version)
         push_tag_and_create_release(runner, tag, args.version, args.repo, args.remote, paths, assets)
     else:
-        print("GitHub Release upload skipped; pass --create-github-release to publish.", flush=True)
+        print(
+            "GitHub Release upload and local tag creation skipped; pass --create-github-release to publish.",
+            flush=True,
+        )
 
     print(f"Release outputs are in {paths.output_dir}", flush=True)
     print(f"SHA-256 manifest: {paths.asset_dir / 'codex-package_SHA256SUMS'}", flush=True)
@@ -293,8 +360,30 @@ def release_paths(
         release_dir=root / "build",
         asset_dir=root / "assets",
         package_dir=root / "packages",
+        notary_dir=root / "notary",
+        notary_state_file=root / "notary" / "submissions.json",
         notes_file=(notes_file.resolve() if notes_file is not None else root / "release-notes.md"),
     )
+
+
+def positive_int_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def env_positive_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return positive_int_arg(value)
+    except argparse.ArgumentTypeError as exc:
+        raise RuntimeError(f"Invalid {name}: {exc}") from exc
 
 
 def resolve_credentials(args: argparse.Namespace, *, require: bool) -> Credentials:
@@ -497,11 +586,11 @@ def build_binaries(runner: CommandRunner) -> None:
 
 
 def prepare_release_dirs(paths: ReleasePaths) -> None:
-    if paths.output_dir.exists():
-        shutil.rmtree(paths.output_dir)
-    paths.release_dir.mkdir(parents=True)
-    paths.asset_dir.mkdir(parents=True)
-    paths.package_dir.mkdir(parents=True)
+    for path in [paths.release_dir, paths.asset_dir, paths.package_dir]:
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True)
+    paths.notary_dir.mkdir(parents=True, exist_ok=True)
 
 
 class signing_keychain:
@@ -610,15 +699,40 @@ def sign_and_notarize_binaries(
     runner: CommandRunner,
     credentials: Credentials,
     identity: str,
+    paths: ReleasePaths,
+    options: NotarizationOptions,
 ) -> None:
     release_dir = CODEX_RS_ROOT / "target" / TARGET / "release"
+    notary_state = load_notary_state(paths.notary_state_file)
+    binary_paths: dict[str, Path] = {}
     for binary in ALL_BINARIES:
         binary_path = release_dir / binary
+        binary_paths[binary] = binary_path
         if not runner.dry_run and not binary_path.is_file():
             raise RuntimeError(f"Built binary not found: {binary_path}")
-        sign_binary(runner, identity, binary_path)
-        notarize_binary(runner, credentials, binary_path)
+        resumable_submission = resumable_notary_submission(notary_state, binary, paths)
+        if resumable_submission is not None:
+            print(
+                f"Reusing Apple notarization submission for {binary}: "
+                f"{resumable_submission['id']}",
+                flush=True,
+            )
+            restore_binary_from_notary_archive(runner, resumable_submission, binary_path)
+        else:
+            sign_binary(runner, identity, binary_path)
         runner.run(["codesign", "--verify", "--strict", "--verbose=2", str(binary_path)])
+        ensure_notary_submission(runner, credentials, binary_path, paths, notary_state, options)
+
+    for binary in ALL_BINARIES:
+        wait_for_notary_acceptance(
+            runner,
+            credentials,
+            binary,
+            binary_paths[binary],
+            paths,
+            notary_state,
+            options,
+        )
 
 
 def sign_binary(runner: CommandRunner, identity: str, binary_path: Path) -> None:
@@ -637,20 +751,91 @@ def sign_binary(runner: CommandRunner, identity: str, binary_path: Path) -> None
     runner.run(cmd)
 
 
-def notarize_binary(
+def ensure_notary_submission(
     runner: CommandRunner,
     credentials: Credentials,
     binary_path: Path,
+    paths: ReleasePaths,
+    notary_state: dict[str, object],
+    options: NotarizationOptions,
 ) -> None:
+    binary = binary_path.name
+    binary_sha256 = "DRY_RUN_BINARY_SHA256" if runner.dry_run else sha256_file(binary_path)
+    submission = notary_submission_for_binary(notary_state, binary)
+    resumable_submission = resumable_notary_submission(notary_state, binary, paths)
+    if resumable_submission is not None and submission.get("status") == ACCEPTED_NOTARY_STATUS:
+        print(f"Apple notarization already accepted for {binary}: {submission['id']}", flush=True)
+        return
+
+    if resumable_submission is None:
+        submission = submit_binary_for_notarization(
+            runner,
+            credentials,
+            binary_path,
+            paths,
+            notary_state,
+            options,
+            binary_sha256,
+        )
+    else:
+        print(f"Apple notarization already submitted for {binary}: {submission['id']}", flush=True)
+
+
+def wait_for_notary_acceptance(
+    runner: CommandRunner,
+    credentials: Credentials,
+    binary: str,
+    binary_path: Path,
+    paths: ReleasePaths,
+    notary_state: dict[str, object],
+    options: NotarizationOptions,
+) -> None:
+    submission = notary_submission_for_binary(notary_state, binary)
+    if submission is None or not submission.get("id"):
+        raise RuntimeError(f"Missing Apple notarization submission for {binary}.")
+    if not runner.dry_run and resumable_notary_submission(notary_state, binary, paths) is None:
+        raise RuntimeError(f"Missing Apple notarization submission for {binary}.")
+    if submission.get("status") == ACCEPTED_NOTARY_STATUS:
+        print(f"Apple notarization already accepted for {binary}: {submission['id']}", flush=True)
+        return
+
+    submission_id = str(submission["id"])
+    status = poll_notary_submission(
+        runner,
+        credentials,
+        submission_id,
+        binary,
+        paths,
+        notary_state,
+        options,
+    )
+    if status != ACCEPTED_NOTARY_STATUS:
+        raise RuntimeError(f"Apple notarization did not complete for {binary}: {status}")
+
+
+def submit_binary_for_notarization(
+    runner: CommandRunner,
+    credentials: Credentials,
+    binary_path: Path,
+    paths: ReleasePaths,
+    notary_state: dict[str, object],
+    options: NotarizationOptions,
+    binary_sha256: str,
+) -> dict[str, object]:
+    binary = binary_path.name
     notary_key = (
         Path("DRY_RUN_NOTARY_KEY.p8")
         if runner.dry_run and credentials.notary_key_p8 is None
         else required_path(credentials.notary_key_p8, "APPLE_NOTARIZATION_KEY_P8_PATH")
     )
-    with tempfile.TemporaryDirectory(prefix="codex-notary-") as temp_dir_str:
-        archive_path = Path(temp_dir_str) / f"{binary_path.name}.zip"
-        runner.run(["ditto", "-c", "-k", "--keepParent", str(binary_path), str(archive_path)])
-        runner.run(
+    archive_path = paths.notary_dir / f"{binary}.zip"
+    runner.run(["ditto", "-c", "-k", "--keepParent", str(binary_path), str(archive_path)])
+    if runner.dry_run:
+        submission_id = f"DRY_RUN_{binary}_SUBMISSION_ID"
+        status = ACCEPTED_NOTARY_STATUS
+    else:
+        output = output_with_retries(
+            runner,
             [
                 "xcrun",
                 "notarytool",
@@ -662,9 +847,294 @@ def notarize_binary(
                 credentials.notary_key_id,
                 "--issuer",
                 credentials.notary_issuer_id,
-                "--wait",
-            ]
+                "--output-format",
+                "json",
+            ],
+            attempts=options.submit_attempts,
+            description=f"submit {binary} for Apple notarization",
         )
+        response = parse_notarytool_json(output, f"submit {binary}")
+        submission_id = str(response.get("id") or "")
+        status = str(response.get("status") or IN_PROGRESS_NOTARY_STATUS)
+        if not submission_id:
+            raise RuntimeError(f"Apple notarization submit did not return an id for {binary}.")
+    archive_sha256 = "DRY_RUN_ARCHIVE_SHA256" if runner.dry_run else sha256_file(archive_path)
+
+    submission = {
+        "id": submission_id,
+        "binary": binary,
+        "binary_sha256": binary_sha256,
+        "archive": str(archive_path),
+        "archive_sha256": archive_sha256,
+        "status": status,
+        "submitted_at": int(time.time()),
+    }
+    set_notary_submission(notary_state, binary, submission)
+    save_notary_state(paths.notary_state_file, notary_state, dry_run=runner.dry_run)
+    print(f"Apple notarization submitted for {binary}: {submission_id} ({status})", flush=True)
+    return submission
+
+
+def poll_notary_submission(
+    runner: CommandRunner,
+    credentials: Credentials,
+    submission_id: str,
+    binary: str,
+    paths: ReleasePaths,
+    notary_state: dict[str, object],
+    options: NotarizationOptions,
+) -> str:
+    if runner.dry_run:
+        print(f"+ poll Apple notarization status for {binary}: {submission_id}", flush=True)
+        return ACCEPTED_NOTARY_STATUS
+
+    notary_key = required_path(credentials.notary_key_p8, "APPLE_NOTARIZATION_KEY_P8_PATH")
+    deadline = time.monotonic() + options.timeout_seconds
+    while True:
+        output = output_with_retries(
+            runner,
+            [
+                "xcrun",
+                "notarytool",
+                "info",
+                submission_id,
+                "--key",
+                str(notary_key),
+                "--key-id",
+                credentials.notary_key_id,
+                "--issuer",
+                credentials.notary_issuer_id,
+                "--output-format",
+                "json",
+            ],
+            attempts=options.submit_attempts,
+            description=f"poll Apple notarization status for {binary}",
+        )
+        response = parse_notarytool_json(output, f"info {submission_id}")
+        status = str(response.get("status") or "")
+        if not status:
+            raise RuntimeError(f"Apple notarization info did not return a status for {binary}.")
+        update_notary_submission_status(notary_state, binary, status)
+        save_notary_state(paths.notary_state_file, notary_state, dry_run=False)
+
+        print(f"Apple notarization status for {binary}: {status}", flush=True)
+        if status == ACCEPTED_NOTARY_STATUS:
+            return status
+        if status != IN_PROGRESS_NOTARY_STATUS:
+            log_path = write_notary_log(
+                runner,
+                credentials,
+                submission_id,
+                paths.notary_dir / f"{binary}-{submission_id}.notary-log.json",
+                attempts=options.submit_attempts,
+            )
+            raise RuntimeError(
+                f"Apple notarization failed for {binary}: {status}. Log: {log_path}"
+            )
+
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            raise RuntimeError(
+                f"Timed out after {options.timeout_seconds}s waiting for Apple notarization "
+                f"of {binary} ({submission_id}). Submission state is saved at "
+                f"{paths.notary_state_file}; rerun the same command with the same --output-dir "
+                "to resume polling instead of uploading again."
+            )
+        time.sleep(min(options.poll_interval_seconds, remaining_seconds))
+
+
+def output_with_retries(
+    runner: CommandRunner,
+    cmd: list[str],
+    *,
+    attempts: int,
+    description: str,
+) -> str:
+    for attempt in range(1, attempts + 1):
+        try:
+            return runner.output(cmd)
+        except subprocess.CalledProcessError as exc:
+            if attempt == attempts:
+                raise RuntimeError(f"Failed to {description} after {attempts} attempts.") from exc
+            sleep_seconds = min(30, 2 ** attempt)
+            print(
+                f"Retrying {description} after failed attempt {attempt}/{attempts} "
+                f"in {sleep_seconds}s.",
+                flush=True,
+            )
+            time.sleep(sleep_seconds)
+    raise AssertionError("unreachable")
+
+
+def parse_notarytool_json(output: str, context: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Could not parse notarytool JSON for {context}: {output}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Expected notarytool JSON object for {context}: {output}")
+    return parsed
+
+
+def write_notary_log(
+    runner: CommandRunner,
+    credentials: Credentials,
+    submission_id: str,
+    log_path: Path,
+    *,
+    attempts: int,
+) -> Path:
+    notary_key = required_path(credentials.notary_key_p8, "APPLE_NOTARIZATION_KEY_P8_PATH")
+    output = output_with_retries(
+        runner,
+        [
+            "xcrun",
+            "notarytool",
+            "log",
+            submission_id,
+            "--key",
+            str(notary_key),
+            "--key-id",
+            credentials.notary_key_id,
+            "--issuer",
+            credentials.notary_issuer_id,
+        ],
+        attempts=attempts,
+        description=f"fetch Apple notarization log {submission_id}",
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(output, encoding="utf-8")
+    return log_path
+
+
+def load_notary_state(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {"schema": 1, "target": TARGET, "submissions": {}}
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Invalid notary state file: {path}")
+    submissions = parsed.setdefault("submissions", {})
+    if not isinstance(submissions, dict):
+        raise RuntimeError(f"Invalid notary state file submissions: {path}")
+    parsed.setdefault("schema", 1)
+    parsed.setdefault("target", TARGET)
+    return parsed
+
+
+def save_notary_state(path: Path, state: dict[str, object], *, dry_run: bool) -> None:
+    if dry_run:
+        print(f"+ write Apple notarization state {path}", flush=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp_path.replace(path)
+
+
+def notary_submission_for_binary(
+    state: dict[str, object],
+    binary: str,
+) -> dict[str, object] | None:
+    submissions = state.get("submissions")
+    if not isinstance(submissions, dict):
+        return None
+    submission = submissions.get(binary)
+    if isinstance(submission, dict):
+        return submission
+    return None
+
+
+def set_notary_submission(
+    state: dict[str, object],
+    binary: str,
+    submission: dict[str, object],
+) -> None:
+    submissions = state.setdefault("submissions", {})
+    if not isinstance(submissions, dict):
+        raise RuntimeError("Invalid notary state: submissions is not an object.")
+    submissions[binary] = submission
+
+
+def update_notary_submission_status(
+    state: dict[str, object],
+    binary: str,
+    status: str,
+) -> None:
+    submission = notary_submission_for_binary(state, binary)
+    if submission is None:
+        return
+    submission["status"] = status
+    submission["updated_at"] = int(time.time())
+
+
+def expected_notary_archive_path(paths: ReleasePaths, binary: str) -> Path:
+    return paths.notary_dir / f"{binary}.zip"
+
+
+def notary_archive_path_from_submission(
+    submission: dict[str, object],
+    paths: ReleasePaths,
+    binary: str,
+) -> Path:
+    archive_value = submission.get("archive")
+    if isinstance(archive_value, str) and archive_value:
+        return Path(archive_value)
+    return expected_notary_archive_path(paths, binary)
+
+
+def resumable_notary_submission(
+    state: dict[str, object],
+    binary: str,
+    paths: ReleasePaths,
+) -> dict[str, object] | None:
+    submission = notary_submission_for_binary(state, binary)
+    if submission is None or not submission.get("id"):
+        return None
+    if submission.get("status") not in {IN_PROGRESS_NOTARY_STATUS, ACCEPTED_NOTARY_STATUS}:
+        return None
+
+    archive_path = notary_archive_path_from_submission(submission, paths, binary)
+    expected_archive_path = expected_notary_archive_path(paths, binary)
+    if archive_path.resolve(strict=False) != expected_archive_path.resolve(strict=False):
+        return None
+    if not archive_path.is_file():
+        return None
+
+    archive_sha256 = submission.get("archive_sha256")
+    if isinstance(archive_sha256, str) and archive_sha256:
+        if archive_sha256 != sha256_file(archive_path):
+            return None
+    return submission
+
+
+def restore_binary_from_notary_archive(
+    runner: CommandRunner,
+    submission: dict[str, object],
+    binary_path: Path,
+) -> None:
+    archive_value = submission.get("archive")
+    if not isinstance(archive_value, str) or not archive_value:
+        raise RuntimeError(f"Notary submission for {binary_path.name} is missing archive path.")
+    archive_path = Path(archive_value)
+    with tempfile.TemporaryDirectory(prefix="codex-notary-restore-") as temp_dir_str:
+        temp_dir = Path(temp_dir_str)
+        runner.run(["ditto", "-x", "-k", str(archive_path), str(temp_dir)])
+        if runner.dry_run:
+            return
+        restored_binaries = [
+            path
+            for path in temp_dir.rglob(binary_path.name)
+            if path.is_file() and not path.name.startswith("._")
+        ]
+        if not restored_binaries:
+            raise RuntimeError(f"Notary archive did not contain {binary_path.name}: {archive_path}")
+        if len(restored_binaries) > 1:
+            raise RuntimeError(
+                f"Notary archive contained multiple {binary_path.name} entries: {archive_path}"
+            )
+        restored_binary = restored_binaries[0]
+        shutil.copy2(restored_binary, binary_path)
+        binary_path.chmod(binary_path.stat().st_mode | 0o755)
 
 
 def build_release_assets(runner: CommandRunner, version: str, paths: ReleasePaths) -> None:
@@ -851,6 +1321,32 @@ def release_asset_names() -> list[str]:
         "codex-package_SHA256SUMS",
         "config-schema.json",
     ]
+
+
+def redact_command(args: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    secret_value_flags = {
+        "-P",
+        "-p",
+        "--issuer",
+        "--key",
+        "--key-id",
+        "--password",
+    }
+    redact_security_partition_password = len(args) >= 2 and args[0:2] == [
+        "security",
+        "set-key-partition-list",
+    ]
+    for arg in args:
+        if redact_next:
+            redacted.append("<redacted>")
+            redact_next = False
+            continue
+        redacted.append(arg)
+        if arg in secret_value_flags or (arg == "-k" and redact_security_partition_password):
+            redact_next = True
+    return redacted
 
 
 def shell_join(args: list[str]) -> str:
