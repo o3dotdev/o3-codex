@@ -30,7 +30,10 @@ jobs:
             HEAD_SHA='${{ github.event.pull_request.head.sha }}'
             echo "Base SHA: $BASE_SHA"
             echo "Head SHA: $HEAD_SHA"
-            mapfile -t files < <(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA")
+            files=()
+            while IFS= read -r file; do
+              files+=("$file")
+            done < <(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA")
           else
             # On manual runs, default to the full fast-PR bundle.
             files=("codex-rs/force" "tools/argument-comment-lint/force" ".github/force")
